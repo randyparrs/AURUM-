@@ -58,4 +58,4 @@ For Bradbury, use the contracts inside `bradbury/` and switch your CLI to the Br
 
 ## Built With
 
-GenLayer Intelligent Contracts — Python contracts with AI consensus via Optimistic Democracy.
+GenLayer Intelligent Contracts  Python contracts with AI consensus via Optimistic Democracy.
