@@ -8,6 +8,8 @@ the judgment on-chain by consensus, with no human in the loop. The data is fact,
 the AI only judges, it never invents numbers.
 
 Live on the GenLayer Bradbury testnet.
+**Live demo:** https://aurumv2.netlify.app/  
+**Network:** GenLayer Bradbury Testnet
 
 ---
 
@@ -69,7 +71,7 @@ Every module is a GenLayer Intelligent Contract:
 
 ## Network and deployed contracts
 
-**GenLayer Bradbury Testnet** — chain ID 4221 (0x107D) — explorer:
+**GenLayer Bradbury Testnet**   chain ID 4221 (0x107D)   explorer:
 https://explorer-bradbury.genlayer.com/
 
 | Contract | Address |
@@ -148,7 +150,7 @@ choices, not design limits, and grow on mainnet:
 
 ## Built with
 
-GenLayer Intelligent Contracts — Python contracts with AI consensus via Optimistic
+GenLayer Intelligent Contracts  Python contracts with AI consensus via Optimistic
 Democracy.
 
 ## Disclaimer
