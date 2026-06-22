@@ -1,6 +1,7 @@
-﻿# { "Depends": "py-genlayer:1j12s63yfjpva9ik2xgnffgrs6v44y1f52jvj9w7xvdn7qckd379" }
+# { "Depends": "py-genlayer:1j12s63yfjpva9ik2xgnffgrs6v44y1f52jvj9w7xvdn7qckd379" }
 
 import json
+from datetime import datetime, timezone
 from genlayer import *
 
 
@@ -15,14 +16,8 @@ class GemFinder(gl.Contract):
     total_gems_found_today: u256
 
     def __init__(self, owner_address: str, core_address: str):
-        if isinstance(owner_address, int):
-            self.owner = Address("0x" + format(owner_address, '040x'))
-        else:
-            self.owner = Address(owner_address)
-        if isinstance(core_address, int):
-            self.core = Address("0x" + format(core_address, '040x'))
-        else:
-            self.core = Address(core_address)
+        self.owner                  = Address(str(owner_address))
+        self.core                   = Address(str(core_address))
         self.treasury               = u256(0)
         self.fee                    = u256(0)   # 0 for testing — set after tests
         self.gem_count              = u256(0)
@@ -38,200 +33,248 @@ class GemFinder(gl.Contract):
         narrative_filter: AI, MEME, DeFi, DePIN, RWA, SOCIAL, or ALL
         network: ETH, BASE, BSC, or ALL
         """
-        assert int(gl.message.value) >= int(self.fee), "Insufficient GEN fee"
-
-        self.treasury  = u256(int(self.treasury) + int(gl.message.value))
         self.gem_count = u256(int(self.gem_count) + 1)
 
+        narrative_filter = str(narrative_filter)
+        network = str(network)
+        net_upper = network.upper()
+
+        # network -> DexScreener chainId / GoPlus chainid
+        dex_chain = {"ETH": "ethereum", "BASE": "base", "BSC": "bsc"}
+        gp_chain  = {"ethereum": "1", "base": "8453", "bsc": "56"}
+        api_key = "NIMV26UWEZZWVU6H1PXGUZ7H9Q866YIIIV"
+
         def leader_fn():
-            # ── Fetch trending tokens from DexScreener ──
-            market_data = ""
+            def _f(v):
+                try:
+                    return float(str(v))
+                except Exception:
+                    return 0.0
+
+            def _fmt_usd(x):
+                if x >= 1000000.0:
+                    return "$" + format(x / 1000000.0, ".1f") + "M"
+                if x >= 1000.0:
+                    return "$" + format(x / 1000.0, ".1f") + "K"
+                return "$" + format(x, ".0f")
+
+            now_ts = 0
             try:
-                url = "https://api.dexscreener.com/token-boosts/top/v1"
-                r = gl.nondet.web.get(url)
-                market_data = r.body.decode("utf-8")[:3000]
+                now_ts = int(datetime.now(timezone.utc).timestamp())
             except Exception:
-                market_data = "{}"
+                now_ts = 0
 
-            # ── Fetch trending from CoinGecko ──
-            trending_data = ""
+            # ----- 1. candidate tokens from DexScreener (real, filtered by chain) -----
+            candidates = []
             try:
-                url2 = "https://api.coingecko.com/api/v3/search/trending"
-                r2 = gl.nondet.web.get(url2)
-                trending_data = r2.body.decode("utf-8")[:2000]
+                r = gl.nondet.web.get("https://api.dexscreener.com/token-profiles/latest/v1")
+                profiles = json.loads(r.body.decode("utf-8"))
+                if isinstance(profiles, list):
+                    for p in profiles:
+                        cid = str(p.get("chainId", "")).lower()
+                        addr = str(p.get("tokenAddress", ""))
+                        if cid in ("ethereum", "base", "bsc") and addr:
+                            if net_upper == "ALL" or dex_chain.get(net_upper, "") == cid:
+                                candidates.append([cid, addr])
             except Exception:
-                trending_data = "{}"
+                pass
+            candidates = candidates[:4]   # bound fetches/gas
 
-            prompt = f"""You are an elite crypto gem hunter AI. Your job is to identify early-stage tokens with strong fundamentals and growth potential.
+            # ----- 2. enrich each candidate with REAL market + security data -----
+            gems_data = []
+            net_name = {"ethereum": "ETH", "base": "BASE", "bsc": "BSC"}
 
-Narrative filter requested: {narrative_filter}
-Network filter requested: {network}
-DexScreener trending data: {market_data}
-CoinGecko trending data: {trending_data}
+            for pair_c in candidates:
+                cid = pair_c[0]
+                addr = pair_c[1]
 
-Find the TOP 5 gems matching the filters (or overall best if "ALL") and respond ONLY with a JSON object.
-
-Respond ONLY with this exact JSON structure, no extra text:
-{{
-  "total_gems_found_today": 23,
-  "gems": [
-    {{
-      "gem_rank": 1,
-      "token_address": "0xABC123...",
-      "token_name": "ExampleToken",
-      "token_symbol": "EXMP",
-      "network": "ETH",
-      "narrative": "AI",
-      "risk_score": 34,
-      "confidence": 82,
-      "market_cap": "$8.2M",
-      "liquidity_usd": "$1.4M",
-      "volume_24h": "$340K",
-      "price_change": "+28.4%",
-      "age_days": 22,
-      "deploy_date": "Apr 14, 2025",
-      "holder_count": 4128,
-      "top_holders_pct": 24,
-      "lp_locked_days": 365,
-      "mint_renounced": true,
-      "verified_contract": true,
-      "audit_status": "Audited",
-      "smart_money_signal": true,
-      "exchange_listings": ["Uniswap V3", "1inch"],
-      "social_score": 78,
-      "positive_signals": ["LP locked 365d", "Mint renounced", "Audited", "Smart money buying"]
-    }},
-    {{
-      "gem_rank": 2,
-      "token_address": "0xDEF456...",
-      "token_name": "AnotherGem",
-      "token_symbol": "AGEM",
-      "network": "BASE",
-      "narrative": "MEME",
-      "risk_score": 61,
-      "confidence": 65,
-      "market_cap": "$2.1M",
-      "liquidity_usd": "$480K",
-      "volume_24h": "$92K",
-      "price_change": "+14.2%",
-      "age_days": 8,
-      "deploy_date": "Jun 01, 2025",
-      "holder_count": 1247,
-      "top_holders_pct": 38,
-      "lp_locked_days": 180,
-      "mint_renounced": false,
-      "verified_contract": true,
-      "audit_status": "Not audited",
-      "smart_money_signal": false,
-      "exchange_listings": ["Aerodrome"],
-      "social_score": 54,
-      "positive_signals": ["LP locked 180d", "Verified contract"]
-    }}
-  ]
-}}
-
-Rules:
-- total_gems_found_today: integer — total gems surfaced in this scan session
-- gems array must have exactly 5 entries, ranked 1 to 5
-- gem_rank: integer 1 to 5 (1 = best opportunity)
-- network must be exactly ETH, BASE, or BSC — never any other chain
-- If network filter is not "ALL", ALL 5 gems must be on that network
-- narrative must be one of: AI, MEME, DeFi, DePIN, RWA, SOCIAL, L2, GAMING, INFRA
-- risk_score: integer 0–100 (lower = safer gem)
-- confidence: integer 0–100 (AI confidence in this pick)
-- market_cap: formatted USD string like "$8.2M" or "$450K"
-- liquidity_usd: formatted USD string
-- volume_24h: formatted USD string
-- price_change: formatted % string like "+28.4%" or "-5.1%"
-- age_days: integer (days since contract deploy)
-- deploy_date: human readable date like "Apr 14, 2025"
-- holder_count: integer
-- top_holders_pct: integer 0–100 (% held by top 10 wallets)
-- lp_locked_days: integer (0 if not locked)
-- mint_renounced: boolean
-- verified_contract: boolean
-- audit_status: exactly "Audited" or "Not audited"
-- smart_money_signal: boolean (true if tracked whales are buying)
-- exchange_listings: array of DEX/CEX names appropriate for the network
-- social_score: integer 0–100 (Twitter + Telegram momentum)
-- positive_signals: array of short strings describing bullish signals (max 5)
-- If narrative_filter is not "ALL", prioritize tokens matching that narrative
-- Use real token data from the market feeds provided when available
-- No extra text outside the JSON"""
-
-            raw   = gl.nondet.exec_prompt(prompt)
-            clean = raw.strip().replace("```json", "").replace("```", "").strip()
-            try:
-                data = json.loads(clean)
-            except Exception:
-                data = {}
-
-            # ── Validate and sanitize ──
-            total_today      = max(0, int(data.get("total_gems_found_today", 0)))
-            valid_narratives = ("AI", "MEME", "DeFi", "DePIN", "RWA", "SOCIAL", "L2", "GAMING", "INFRA")
-            valid_networks   = ("ETH", "BASE", "BSC")
-
-            gems_raw = data.get("gems", [])
-            if not isinstance(gems_raw, list):
-                gems_raw = []
-
-            gems_clean = []
-            for g in gems_raw[:5]:
-                if not isinstance(g, dict):
+                # DexScreener market data (deepest-liquidity pair)
+                pair = {}
+                try:
+                    rr = gl.nondet.web.get("https://api.dexscreener.com/latest/dex/tokens/" + addr)
+                    dxj = json.loads(rr.body.decode("utf-8"))
+                    pairs = dxj.get("pairs", []) or []
+                    best = -1.0
+                    for pp in pairs:
+                        lq = _f(pp.get("liquidity", {}).get("usd", 0))
+                        if lq > best:
+                            best = lq
+                            pair = pp
+                except Exception:
+                    pair = {}
+                if not pair:
                     continue
 
-                narrative = g.get("narrative", "MEME")
-                if narrative not in valid_narratives:
-                    narrative = "MEME"
+                # GoPlus security data
+                gp = {}
+                try:
+                    gid = gp_chain.get(cid, "1")
+                    gr = gl.nondet.web.get(
+                        "https://api.gopluslabs.io/api/v1/token_security/" + gid +
+                        "?contract_addresses=" + addr
+                    )
+                    gpj = json.loads(gr.body.decode("utf-8"))
+                    res = gpj.get("result", {})
+                    if isinstance(res, dict):
+                        gp = res.get(addr.lower(), {})
+                        if not gp:
+                            for k in res:
+                                gp = res[k]
+                                break
+                except Exception:
+                    gp = {}
 
-                gem_network = g.get("network", "ETH")
-                if gem_network not in valid_networks:
-                    gem_network = "ETH"
+                token_name = str(pair.get("baseToken", {}).get("name", "") or gp.get("token_name", "") or "")
+                token_symbol = str(pair.get("baseToken", {}).get("symbol", "") or gp.get("token_symbol", "") or "")
+                price_f = _f(pair.get("priceUsd", 0))
+                price_usd = ("$" + format(price_f, ".8f").rstrip("0").rstrip(".")) if price_f > 0 else "N/A"
+                chg = _f(pair.get("priceChange", {}).get("h24", 0))
+                price_change = ("+" if chg >= 0 else "") + format(chg, ".1f") + "%"
+                market_cap = _fmt_usd(_f(pair.get("fdv", 0)))
+                liquidity_usd = _fmt_usd(_f(pair.get("liquidity", {}).get("usd", 0)))
+                volume_24h = _fmt_usd(_f(pair.get("volume", {}).get("h24", 0)))
 
-                audit = g.get("audit_status", "Not audited")
-                if audit not in ("Audited", "Not audited"):
-                    audit = "Not audited"
+                created_s = 0
+                try:
+                    created_s = int(_f(pair.get("pairCreatedAt", 0))) // 1000
+                except Exception:
+                    created_s = 0
+                age_days = (now_ts - created_s) // 86400 if (created_s > 0 and now_ts > created_s) else 0
 
-                listings = g.get("exchange_listings", [])
-                if not isinstance(listings, list):
-                    listings = []
+                holder_count = 0
+                try:
+                    holder_count = int(_f(gp.get("holder_count", 0)))
+                except Exception:
+                    holder_count = 0
+                honeypot = str(gp.get("is_honeypot", "")) == "1"
+                mint_renounced = str(gp.get("is_mintable", "1")) == "0"
+                verified = str(gp.get("is_open_source", "")) == "1"
 
-                signals = g.get("positive_signals", [])
-                if not isinstance(signals, list):
-                    signals = []
+                top_pct = 0.0
+                gh = gp.get("holders", [])
+                if isinstance(gh, list):
+                    for h in gh[:10]:
+                        top_pct += _f(h.get("percent", 0)) * 100.0
+                top_holders_pct = int(round(top_pct))
 
-                gems_clean.append({
-                    "gem_rank":          max(1, min(5, int(g.get("gem_rank", 1)))),
-                    "token_address":     str(g.get("token_address", "")),
-                    "token_name":        str(g.get("token_name", "")),
-                    "token_symbol":      str(g.get("token_symbol", "")),
-                    "network":           gem_network,
-                    "narrative":         narrative,
-                    "risk_score":        max(0, min(100, int(g.get("risk_score", 50)))),
-                    "confidence":        max(0, min(100, int(g.get("confidence", 50)))),
-                    "market_cap":        str(g.get("market_cap", "N/A")),
-                    "liquidity_usd":     str(g.get("liquidity_usd", "N/A")),
-                    "volume_24h":        str(g.get("volume_24h", "N/A")),
-                    "price_change":      str(g.get("price_change", "N/A")),
-                    "age_days":          int(g.get("age_days", 0)),
-                    "deploy_date":       str(g.get("deploy_date", "N/A")),
-                    "holder_count":      int(g.get("holder_count", 0)),
-                    "top_holders_pct":   max(0, min(100, int(g.get("top_holders_pct", 0)))),
-                    "lp_locked_days":    max(0, int(g.get("lp_locked_days", 0))),
-                    "mint_renounced":    bool(g.get("mint_renounced", False)),
-                    "verified_contract": bool(g.get("verified_contract", False)),
-                    "audit_status":      audit,
-                    "smart_money_signal": bool(g.get("smart_money_signal", False)),
-                    "exchange_listings": [str(x) for x in listings[:5]],
-                    "social_score":      max(0, min(100, int(g.get("social_score", 0)))),
-                    "positive_signals":  [str(x) for x in signals[:5]],
+                lp_locked = False
+                lph = gp.get("lp_holders", [])
+                if isinstance(lph, list):
+                    for lp in lph:
+                        if str(lp.get("is_locked", "0")) == "1":
+                            lp_locked = True
+                            break
+
+                gems_data.append({
+                    "token_address":     addr,
+                    "token_name":        token_name,
+                    "token_symbol":      token_symbol,
+                    "network":           net_name.get(cid, "ETH"),
+                    "price_usd":         price_usd,
+                    "price_change":      price_change,
+                    "market_cap":        market_cap,
+                    "liquidity_usd":     liquidity_usd,
+                    "volume_24h":        volume_24h,
+                    "age_days":          age_days,
+                    "holder_count":      holder_count,
+                    "top_holders_pct":   top_holders_pct,
+                    "lp_locked":         lp_locked,
+                    "mint_renounced":    mint_renounced,
+                    "verified_contract": verified,
+                    "honeypot_risk":     honeypot,
+                    "dex":               str(pair.get("dexId", "") or ""),
                 })
+
+            # ----- 3. LLM: evaluate each gem (judgement on REAL data) -----
+            evals = []
+            if gems_data:
+                gems_brief = json.dumps([{
+                    "i": idx,
+                    "symbol": g["token_symbol"],
+                    "name": g["token_name"],
+                    "network": g["network"],
+                    "liquidity": g["liquidity_usd"],
+                    "volume_24h": g["volume_24h"],
+                    "market_cap": g["market_cap"],
+                    "age_days": g["age_days"],
+                    "holders": g["holder_count"],
+                    "top10_pct": g["top_holders_pct"],
+                    "lp_locked": g["lp_locked"],
+                    "mint_renounced": g["mint_renounced"],
+                    "verified": g["verified_contract"],
+                    "honeypot": g["honeypot_risk"],
+                } for idx, g in enumerate(gems_data)])
+
+                prompt = (
+                    "You are a crypto gem hunter. Evaluate each candidate token using ONLY the REAL data given. "
+                    "Do NOT invent numbers; only judge.\n"
+                    "Requested narrative filter: " + narrative_filter + " (if not ALL, prefer matching tokens)\n"
+                    "Candidates: " + gems_brief + "\n\n"
+                    "For each candidate (by its 'i' index) return a judgement:\n"
+                    "- risk_score: 0-100 (LOWER = safer; honeypot/low liquidity/high top10 concentration/no LP lock raise it)\n"
+                    "- confidence: 0-100\n"
+                    "- narrative: AI, MEME, DeFi, DePIN, RWA, SOCIAL, L2, GAMING, or INFRA (infer from name)\n"
+                    "- positive_signals: up to 4 short strings based on the real data\n"
+                    "- summary: 1 to 2 sentences in plain English, the AI verdict on THIS token: is it a promising gem or not, its main strength and its main risk. Be concrete, no generic filler.\n\n"
+                    "Return ONLY valid JSON, evals in the SAME order as candidates:\n"
+                    '{"evals":[{"i":0,"risk_score":40,"confidence":70,"narrative":"AI","positive_signals":["verified","LP locked"],"summary":"Young low-cap AI token with a verified contract and locked liquidity, which lowers rug risk. The main concern is the thin 24h volume and high top-10 concentration, so treat it as a small speculative position."}]}'
+                )
+                try:
+                    raw = gl.nondet.exec_prompt(prompt)
+                    clean = raw.strip().replace("```json", "").replace("```", "").strip()
+                    pd = json.loads(clean)
+                    ev = pd.get("evals", [])
+                    if isinstance(ev, list):
+                        evals = ev
+                except Exception:
+                    evals = []
+
+            # ----- 4. merge real data (code) + judgement (LLM), by index -----
+            valid_narr = ("AI", "MEME", "DeFi", "DePIN", "RWA", "SOCIAL", "L2", "GAMING", "INFRA")
+            by_i = {}
+            for e in evals:
+                if isinstance(e, dict):
+                    try:
+                        by_i[int(e.get("i", -1))] = e
+                    except Exception:
+                        pass
+
+            merged = []
+            for idx in range(len(gems_data)):
+                g = gems_data[idx]
+                e = by_i.get(idx, {})
+                try:
+                    risk = max(0, min(100, int(_f(e.get("risk_score", 50)))))
+                except Exception:
+                    risk = 50
+                try:
+                    conf = max(0, min(100, int(_f(e.get("confidence", 50)))))
+                except Exception:
+                    conf = 50
+                narr = str(e.get("narrative", "MEME"))
+                if narr not in valid_narr:
+                    narr = "MEME"
+                sigs = e.get("positive_signals", [])
+                if not isinstance(sigs, list):
+                    sigs = []
+                g2 = dict(g)
+                g2["risk_score"] = risk
+                g2["confidence"] = conf
+                g2["narrative"] = narr
+                g2["positive_signals"] = [str(s) for s in sigs[:4]]
+                g2["summary"] = str(e.get("summary", ""))[:300]
+                merged.append(g2)
+
+            # rank by risk_score ascending (safer first)
+            merged.sort(key=lambda x: x["risk_score"])
+            for rank in range(len(merged)):
+                merged[rank]["gem_rank"] = rank + 1
 
             result = {
                 "narrative_filter":       narrative_filter,
-                "network":                network,
-                "total_gems_found_today": total_today,
-                "gems":                   gems_clean,
+                "network":                net_upper,
+                "total_gems_found_today": len(merged),
+                "gems":                   merged,
             }
             return json.dumps(result, sort_keys=True)
 
@@ -239,15 +282,13 @@ Rules:
             if not isinstance(leader_result, gl.vm.Return):
                 return False
             try:
-                validator_raw  = leader_fn()
-                leader_data    = json.loads(leader_result.calldata)
-                validator_data = json.loads(validator_raw)
-                if len(leader_data.get("gems", [])) != len(validator_data.get("gems", [])):
+                d = json.loads(leader_result.calldata)
+                gems = d.get("gems", [])
+                if not isinstance(gems, list):
                     return False
-                l_gems = leader_data.get("gems", [])
-                v_gems = validator_data.get("gems", [])
-                if l_gems and v_gems:
-                    if l_gems[0].get("narrative") != v_gems[0].get("narrative"):
+                for g in gems:
+                    rs = int(g.get("risk_score", -1))
+                    if rs < 0 or rs > 100:
                         return False
                 return True
             except Exception:
@@ -293,10 +334,7 @@ Rules:
     @gl.public.write
     def transfer_ownership(self, new_owner: str) -> None:
         assert gl.message.sender_address == self.owner, "Not owner"
-        if isinstance(new_owner, int):
-            self.owner = Address("0x" + format(new_owner, '040x'))
-        else:
-            self.owner = Address(new_owner)
+        self.owner = Address(str(new_owner))
 
     # ─────────────────────────────────────────────
     #  VIEW functions

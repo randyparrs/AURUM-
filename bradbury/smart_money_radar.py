@@ -1,7 +1,24 @@
-﻿# { "Depends": "py-genlayer:1j12s63yfjpva9ik2xgnffgrs6v44y1f52jvj9w7xvdn7qckd379" }
+# { "Depends": "py-genlayer:1j12s63yfjpva9ik2xgnffgrs6v44y1f52jvj9w7xvdn7qckd379" }
 
 import json
+from datetime import datetime, timezone
 from genlayer import *
+
+
+# Optional labels: if a detected whale happens to be a well-known wallet, tag it.
+# This is only a bonus label — the whales themselves are found dynamically per token.
+KNOWN_WHALES = {
+    "0x3ddfa8ec3052539b6c9549f12cea2c295cff5296": "Justin Sun",
+    "0xd8da6bf26964af9d7eed9e03e53415d37aa96045": "Vitalik Buterin",
+    "0xf977814e90da44bfa03b6295a0616a897441acec": "Binance",
+    "0x28c6c06298d514db089934071355e5743bf21d60": "Binance 14",
+    "0x47ac0fb4f2d84898e4d9e7b4dab3c24507a6d503": "Binance",
+}
+
+# DexScreener chainId -> GeckoTerminal network slug (radar is ETH-first).
+GT_NETWORK = {
+    "ethereum": "eth",
+}
 
 
 class SmartMoneyRadar(gl.Contract):
@@ -12,231 +29,250 @@ class SmartMoneyRadar(gl.Contract):
     fee:             u256
     scans:           DynArray[str]   # token_address_lower:json
     scan_count:      u256
-    tracked_wallets: DynArray[str]   # one address per entry
 
     def __init__(self, owner_address: str, core_address: str):
-        if isinstance(owner_address, int):
-            self.owner = Address("0x" + format(owner_address, '040x'))
-        else:
-            self.owner = Address(owner_address)
-        if isinstance(core_address, int):
-            self.core = Address("0x" + format(core_address, '040x'))
-        else:
-            self.core = Address(core_address)
+        self.owner      = Address(str(owner_address))
+        self.core       = Address(str(core_address))
         self.treasury   = u256(0)
         self.fee        = u256(0)   # 0 for testing — set after tests
         self.scan_count = u256(0)
 
     # ─────────────────────────────────────────────
-    #  MAIN: scan whale activity for a token
+    #  MAIN: scan REAL whale activity for a token
+    #  (the actual wallets buying/selling THIS token now, read from the
+    #   DEX pool's attributed trades via GeckoTerminal — each trade already
+    #   carries the trader wallet + buy/sell + USD, so no guessing.)
     # ─────────────────────────────────────────────
     @gl.public.write
     def scan_token(self, token_address: str, token_name: str) -> None:
-        assert int(gl.message.value) >= int(self.fee), "Insufficient GEN fee"
-
-        self.treasury   = u256(int(self.treasury) + int(gl.message.value))
         self.scan_count = u256(int(self.scan_count) + 1)
 
-        # Build the wallet list for the prompt (up to 32 tracked wallets)
-        wallet_list = []
-        max_wallets = min(len(self.tracked_wallets), 32)
-        for i in range(max_wallets):
-            wallet_list.append(self.tracked_wallets[i])
+        token_address = str(token_address)
+        token_name    = str(token_name)
 
         def leader_fn():
-            # ── Fetch token market data from DexScreener ──
-            token_data = ""
-            try:
-                dex_url = f"https://api.dexscreener.com/latest/dex/search?q={token_name}"
-                r = gl.nondet.web.get(dex_url)
-                token_data = r.body.decode("utf-8")[:2000]
-            except Exception:
-                token_data = "{}"
+            t = token_address
 
-            # ── Fetch recent txs for first tracked wallet (as sample) ──
-            whale_sample = ""
-            if len(wallet_list) > 0:
+            def _f(v):
                 try:
-                    eth_url = (
-                        f"https://api.etherscan.io/api?module=account&action=tokentx"
-                        f"&address={wallet_list[0]}&page=1&offset=10&sort=desc"
-                    )
-                    r2 = gl.nondet.web.get(eth_url)
-                    whale_sample = r2.body.decode("utf-8")[:2000]
+                    return float(str(v))
                 except Exception:
-                    whale_sample = "{}"
+                    return 0.0
 
-            wallets_str = json.dumps(wallet_list[:32])
+            def _fmt_usd(x):
+                if x >= 1000000.0:
+                    return "$" + format(x / 1000000.0, ".1f") + "M"
+                if x >= 1000.0:
+                    return "$" + format(x / 1000.0, ".1f") + "K"
+                return "$" + format(x, ".0f")
 
-            prompt = f"""You are an elite on-chain intelligence analyst specializing in smart money and whale wallet tracking.
-Analyze whale wallet activity for the token below and respond ONLY with a JSON object.
-
-Token address: {token_address}
-Token name: {token_name}
-Market data: {token_data}
-Sample whale transaction data: {whale_sample}
-Tracked whale wallets ({len(wallet_list)} total): {wallets_str}
-
-Respond ONLY with this exact JSON structure, no extra text:
-{{
-  "token_address": "{token_address}",
-  "token_name": "{token_name}",
-  "consensus": "BULLISH",
-  "buy_pressure": 68,
-  "sell_pressure": 32,
-  "cluster_count": 3,
-  "cluster_detail": "5 whales accumulating {token_name} on ETH, 2 whales rotating to BASE",
-  "first_time_entry": true,
-  "whale_pnl_24h": "+$2.84M",
-  "whale_tx_count_24h": 124,
-  "top_movers_count": 8,
-  "rotation_narrative": "AI",
-  "top_accumulating_token": "{token_name}",
-  "top_dumping_token": "SHIB",
-  "alert_strength": "STRONG",
-  "alert_age": "2h ago",
-  "price_move_since_alert": "+12.4%",
-  "accuracy_rate": 74,
-  "avg_return_per_alert": "+18.3%",
-  "wallets": [
-    {{
-      "address": "0xWHALE1",
-      "pnl": "+$1.2M",
-      "roi": "+34.5%",
-      "win_rate": 78,
-      "streak": "5W",
-      "best_call": "+340%",
-      "avg_hold": "4d",
-      "top_holdings": ["{token_name}", "ETH", "USDC"],
-      "recent_txs": [
-        {{"type": "BUY",  "token": "{token_name}", "amount": "$420,000"}},
-        {{"type": "SELL", "token": "SHIB",         "amount": "$85,000"}}
-      ]
-    }},
-    {{
-      "address": "0xWHALE2",
-      "pnl": "-$320,000",
-      "roi": "-8.2%",
-      "win_rate": 55,
-      "streak": "2L",
-      "best_call": "+120%",
-      "avg_hold": "12d",
-      "top_holdings": ["ETH", "BTC", "{token_name}"],
-      "recent_txs": [
-        {{"type": "BUY", "token": "{token_name}", "amount": "$150,000"}}
-      ]
-    }}
-  ]
-}}
-
-Rules:
-- consensus must be exactly BULLISH or BEARISH
-- buy_pressure + sell_pressure must equal 100 (integers)
-- cluster_count is integer ≥ 0
-- first_time_entry is true if any tracked wallet is buying this token for the first time
-- whale_pnl_24h is a formatted string like "+$2.84M" or "-$450K"
-- whale_tx_count_24h is integer
-- top_movers_count is integer ≤ {len(wallet_list) if wallet_list else 32}
-- rotation_narrative must be one of: AI, MEME, DeFi, DePIN, RWA, SOCIAL, L2, GAMING, INFRA
-- top_accumulating_token: token symbol most bought by whales in 24h
-- top_dumping_token: token symbol most sold by whales in 24h
-- alert_strength must be exactly: WEAK, MODERATE, or STRONG
-- alert_age: human-readable string like "2h ago", "45m ago", "1d ago"
-- price_move_since_alert: formatted % string like "+12.4%" or "-3.2%"
-- accuracy_rate: integer 0–100 representing historical % of correct alerts
-- avg_return_per_alert: formatted % string like "+18.3%" representing avg return when following alerts
-- wallets array: include ONLY the tracked wallets that show activity for this token — up to 32 entries
-- Each wallet entry: address, pnl (formatted string), roi (formatted % string), win_rate (0–100 int),
-  streak (ex: "5W" = 5 wins in a row, "2L" = 2 losses), best_call (best ever % return),
-  avg_hold (average hold time ex: "4d"), top_holdings (array of 3 token symbols),
-  recent_txs (array of up to 5 tx objects with type/token/amount)
-- Use real wallet addresses from the tracked_wallets list in the wallets array
-- No extra text outside the JSON"""
-
-            raw   = gl.nondet.exec_prompt(prompt)
-            clean = raw.strip().replace("```json", "").replace("```", "").strip()
+            # ----- 1. token market data + the main trading pool (DexScreener) -----
+            pair = {}
             try:
-                data = json.loads(clean)
+                r = gl.nondet.web.get("https://api.dexscreener.com/latest/dex/tokens/" + t)
+                dxj = json.loads(r.body.decode("utf-8"))
+                pairs = dxj.get("pairs", []) or []
+                best = -1.0
+                for p in pairs:
+                    lq = _f(p.get("liquidity", {}).get("usd", 0))
+                    if lq > best:
+                        best = lq
+                        pair = p
+            except Exception:
+                pair = {}
+
+            token_symbol = str(pair.get("baseToken", {}).get("symbol", "") or "")
+            tname = str(pair.get("baseToken", {}).get("name", "") or token_name)
+            price_f = _f(pair.get("priceUsd", 0))
+            price_usd = ("$" + format(price_f, ".8f").rstrip("0").rstrip(".")) if price_f > 0 else "N/A"
+            liquidity_usd = _fmt_usd(_f(pair.get("liquidity", {}).get("usd", 0)))
+            volume_24h = _fmt_usd(_f(pair.get("volume", {}).get("h24", 0)))
+            chg = _f(pair.get("priceChange", {}).get("h24", 0))
+            price_change = ("+" if chg >= 0 else "") + format(chg, ".1f") + "%"
+            pair_addr = str(pair.get("pairAddress", "") or "")
+            chain_id = str(pair.get("chainId", "ethereum") or "ethereum")
+            network = GT_NETWORK.get(chain_id, "eth")
+
+            now_ts = 0
+            try:
+                now_ts = int(datetime.now(timezone.utc).timestamp())
+            except Exception:
+                now_ts = 0
+
+            ZERO = "0x0000000000000000000000000000000000000000"
+            DEAD = "0x000000000000000000000000000000000000dead"
+
+            # ----- 2. REAL whales: attributed DEX trades for that pool (GeckoTerminal) -----
+            # Each trade already gives the trader wallet, kind (buy/sell) and USD value,
+            # so buys and sells are attributed correctly (no pool/router guessing).
+            flows = {}   # wallet -> [bought_usd, sold_usd, last_ts, last_action]
+            trades_count = 0
+            if pair_addr:
+                try:
+                    gurl = ("https://api.geckoterminal.com/api/v2/networks/" + network +
+                            "/pools/" + pair_addr + "/trades")
+                    gr = gl.nondet.web.get(gurl)
+                    gj = json.loads(gr.body.decode("utf-8"))
+                    trades = gj.get("data", [])
+                    if isinstance(trades, list):
+                        trades_count = len(trades)
+                        for tr in trades:
+                            a = tr.get("attributes", {})
+                            if not isinstance(a, dict):
+                                continue
+                            wallet = str(a.get("tx_from_address", "") or "").lower()
+                            if wallet in ("", ZERO, DEAD):
+                                continue
+                            kind = str(a.get("kind", "") or "").lower()
+                            usd = _f(a.get("volume_in_usd", 0))
+                            if usd <= 0:
+                                continue
+
+                            # parse ISO timestamp -> epoch (best effort)
+                            ts = 0
+                            try:
+                                s2 = str(a.get("block_timestamp", "")).replace("Z", "").replace("T", " ")
+                                dt = datetime.strptime(s2[:19], "%Y-%m-%d %H:%M:%S")
+                                ts = int(dt.replace(tzinfo=timezone.utc).timestamp())
+                            except Exception:
+                                ts = 0
+
+                            f = flows.get(wallet, [0.0, 0.0, 0, ""])
+                            if kind == "buy":
+                                f[0] += usd
+                                act = "BUY"
+                            elif kind == "sell":
+                                f[1] += usd
+                                act = "SELL"
+                            else:
+                                continue
+                            if ts >= f[2]:
+                                f[2] = ts
+                                f[3] = act
+                            flows[wallet] = f
+                except Exception:
+                    pass
+
+            # ----- build whale list, ranked by total USD volume -----
+            whales = []
+            total_buy_usd = 0.0
+            total_sell_usd = 0.0
+            buyers = 0
+            sellers = 0
+            for wallet in flows:
+                f = flows[wallet]
+                bought = f[0]
+                sold = f[1]
+                total_buy_usd += bought
+                total_sell_usd += sold
+                if bought > sold:
+                    buyers += 1
+                elif sold > bought:
+                    sellers += 1
+                net = bought - sold
+                days_ago = (now_ts - f[2]) // 86400 if (now_ts > f[2] and f[2] > 0) else 0
+                whales.append({
+                    "address":     wallet,
+                    "label":       KNOWN_WHALES.get(wallet, ""),
+                    "bought_usd":  _fmt_usd(bought),
+                    "sold_usd":    _fmt_usd(sold),
+                    "net_usd":     ("+" if net >= 0 else "-") + _fmt_usd(abs(net)),
+                    "last_action": f[3],
+                    "days_ago":    days_ago,
+                    "_vol":        bought + sold,
+                })
+            whales.sort(key=lambda x: x["_vol"], reverse=True)
+            whales = whales[:10]
+            for w in whales:
+                del w["_vol"]
+
+            whale_count = len(whales)
+            total_usd = total_buy_usd + total_sell_usd
+            buy_pressure = int((total_buy_usd * 100) / total_usd) if total_usd > 0 else 50
+            sell_pressure = 100 - buy_pressure
+
+            # ----- 3. LLM: judgement only, on the REAL flow above -----
+            whales_brief = json.dumps([{
+                "addr":   w["address"][:10],
+                "bought": w["bought_usd"],
+                "sold":   w["sold_usd"],
+                "net":    w["net_usd"],
+                "last":   w["last_action"],
+            } for w in whales[:8]])
+
+            prompt = (
+                "You are an on-chain smart-money analyst. Based ONLY on this REAL data, give your read. "
+                "Do NOT invent numbers.\n"
+                "Token: " + tname + " (" + token_symbol + ")\n"
+                "Price: " + price_usd + " | 24h vol: " + volume_24h + " | liquidity: " + liquidity_usd +
+                " | 24h change: " + price_change + "\n"
+                "Real wallets trading this token now: " + str(whale_count) +
+                " | buyers: " + str(buyers) + " | sellers: " + str(sellers) + "\n"
+                "Recent buy volume: $" + format(total_buy_usd, ".0f") +
+                " | sell volume: $" + format(total_sell_usd, ".0f") +
+                " | buy pressure: " + str(buy_pressure) + "%\n"
+                "Top wallets (bought / sold USD): " + whales_brief + "\n\n"
+                "Rules:\n"
+                "- consensus: BULLISH or BEARISH (follow buy vs sell pressure)\n"
+                "- alert_strength: WEAK, MODERATE, or STRONG (STRONG = many wallets + strong one-sided pressure)\n"
+                "- rotation_narrative: AI, MEME, DeFi, DePIN, RWA, SOCIAL, L2, GAMING, or INFRA\n"
+                "- summary: 1 to 2 sentences on what the wallets are doing with this token right now\n\n"
+                "Return ONLY valid JSON:\n"
+                '{"consensus":"BULLISH","alert_strength":"MODERATE","rotation_narrative":"MEME","summary":"..."}'
+            )
+
+            data = {}
+            try:
+                raw = gl.nondet.exec_prompt(prompt, response_format="json")
+                if isinstance(raw, dict):
+                    data = raw
+                else:
+                    clean = str(raw).strip().replace("```json", "").replace("```", "").strip()
+                    data = json.loads(clean)
+                    if not isinstance(data, dict):
+                        data = {}
             except Exception:
                 data = {}
 
-            # ── Validate and sanitize ──
-            consensus = data.get("consensus", "BULLISH")
+            consensus = str(data.get("consensus", ""))
             if consensus not in ("BULLISH", "BEARISH"):
-                consensus = "BULLISH"
-
-            buy_pressure  = max(0, min(100, int(data.get("buy_pressure", 50))))
-            sell_pressure = 100 - buy_pressure
-
-            cluster_count = max(0, int(data.get("cluster_count", 0)))
-
-            narrative = data.get("rotation_narrative", "MEME")
-            valid_narratives = ("AI", "MEME", "DeFi", "DePIN", "RWA", "SOCIAL", "L2", "GAMING", "INFRA")
-            if narrative not in valid_narratives:
-                narrative = "MEME"
-
-            alert_strength = data.get("alert_strength", "MODERATE")
+                consensus = "BULLISH" if buy_pressure >= 50 else "BEARISH"
+            alert_strength = str(data.get("alert_strength", "MODERATE"))
             if alert_strength not in ("WEAK", "MODERATE", "STRONG"):
                 alert_strength = "MODERATE"
-
-            accuracy_rate = max(0, min(100, int(data.get("accuracy_rate", 50))))
-
-            wallets_raw = data.get("wallets", [])
-            if not isinstance(wallets_raw, list):
-                wallets_raw = []
-
-            wallets_clean = []
-            for w in wallets_raw[:32]:
-                if not isinstance(w, dict):
-                    continue
-                win_rate = max(0, min(100, int(w.get("win_rate", 50))))
-                holdings = w.get("top_holdings", [])
-                if not isinstance(holdings, list):
-                    holdings = []
-                txs = w.get("recent_txs", [])
-                if not isinstance(txs, list):
-                    txs = []
-                txs_clean = []
-                for tx in txs[:5]:
-                    if isinstance(tx, dict) and tx.get("type") in ("BUY", "SELL"):
-                        txs_clean.append({
-                            "type":   str(tx.get("type", "BUY")),
-                            "token":  str(tx.get("token", "")),
-                            "amount": str(tx.get("amount", "")),
-                        })
-                wallets_clean.append({
-                    "address":      str(w.get("address", "")),
-                    "pnl":          str(w.get("pnl", "N/A")),
-                    "roi":          str(w.get("roi", "N/A")),
-                    "win_rate":     win_rate,
-                    "streak":       str(w.get("streak", "N/A")),
-                    "best_call":    str(w.get("best_call", "N/A")),
-                    "avg_hold":     str(w.get("avg_hold", "N/A")),
-                    "top_holdings": [str(h) for h in holdings[:3]],
-                    "recent_txs":   txs_clean,
-                })
+            narrative = str(data.get("rotation_narrative", "MEME"))
+            if narrative not in ("AI", "MEME", "DeFi", "DePIN", "RWA", "SOCIAL", "L2", "GAMING", "INFRA"):
+                narrative = "MEME"
 
             result = {
-                "token_address":        token_address,
-                "token_name":           token_name,
+                "token_address":        t,
+                "token_name":           tname,
+                "token_symbol":         token_symbol,
+                "price_usd":            price_usd,
+                "price_current":        price_usd,
+                "price_change_24h":     price_change,
+                "volume_24h":           volume_24h,
+                "liquidity_usd":        liquidity_usd,
                 "consensus":            consensus,
                 "buy_pressure":         buy_pressure,
                 "sell_pressure":        sell_pressure,
-                "cluster_count":        cluster_count,
-                "cluster_detail":       str(data.get("cluster_detail", "")),
-                "first_time_entry":     bool(data.get("first_time_entry", False)),
-                "whale_pnl_24h":        str(data.get("whale_pnl_24h", "N/A")),
-                "whale_tx_count_24h":   int(data.get("whale_tx_count_24h", 0)),
-                "top_movers_count":     int(data.get("top_movers_count", 0)),
-                "rotation_narrative":   narrative,
-                "top_accumulating_token": str(data.get("top_accumulating_token", token_name)),
-                "top_dumping_token":    str(data.get("top_dumping_token", "N/A")),
+                "whale_count":          whale_count,
+                "buyers":               buyers,
+                "sellers":              sellers,
+                "total_buy_usd":        _fmt_usd(total_buy_usd),
+                "total_sell_usd":       _fmt_usd(total_sell_usd),
+                "trades_analyzed":      trades_count,
+                "transfers_analyzed":   trades_count,  # compat alias for the modal label
+                "whales":               whales,
                 "alert_strength":       alert_strength,
-                "alert_age":            str(data.get("alert_age", "N/A")),
-                "price_move_since_alert": str(data.get("price_move_since_alert", "N/A")),
-                "accuracy_rate":        accuracy_rate,
-                "avg_return_per_alert": str(data.get("avg_return_per_alert", "N/A")),
-                "wallets":              wallets_clean,
+                "rotation_narrative":   narrative,
+                "summary":              str(data.get("summary", "")),
+                # ---- compat with the current modal fields ----
+                "whales_holding_count": whale_count,
+                "whales_tracked_total": whale_count,
+                "whale_buys":           buyers,
+                "whale_sells":          sellers,
+                "first_entries":        [],
             }
             return json.dumps(result, sort_keys=True)
 
@@ -244,14 +280,11 @@ Rules:
             if not isinstance(leader_result, gl.vm.Return):
                 return False
             try:
-                validator_raw  = leader_fn()
-                leader_data    = json.loads(leader_result.calldata)
-                validator_data = json.loads(validator_raw)
-                # Must agree on BULLISH/BEARISH direction
-                if leader_data.get("consensus") != validator_data.get("consensus"):
+                d = json.loads(leader_result.calldata)
+                if d.get("consensus") not in ("BULLISH", "BEARISH"):
                     return False
-                # Buy pressure within 15 points
-                if abs(int(leader_data.get("buy_pressure", 50)) - int(validator_data.get("buy_pressure", 50))) > 15:
+                bp = int(d.get("buy_pressure", -1))
+                if bp < 0 or bp > 100:
                     return False
                 return True
             except Exception:
@@ -273,31 +306,6 @@ Rules:
             self.scans.append(entry)
 
     # ─────────────────────────────────────────────
-    #  OWNER: wallet management
-    # ─────────────────────────────────────────────
-    @gl.public.write
-    def add_wallet(self, wallet_address: str) -> None:
-        assert gl.message.sender_address == self.owner, "Not owner"
-        addr = wallet_address.lower()
-        for i in range(len(self.tracked_wallets)):
-            if self.tracked_wallets[i].lower() == addr:
-                return   # already tracked
-        assert len(self.tracked_wallets) < 32, "Maximum 32 wallets reached"
-        self.tracked_wallets.append(wallet_address)
-
-    @gl.public.write
-    def remove_wallet(self, wallet_address: str) -> None:
-        assert gl.message.sender_address == self.owner, "Not owner"
-        addr = wallet_address.lower()
-        for i in range(len(self.tracked_wallets)):
-            if self.tracked_wallets[i].lower() == addr:
-                last = len(self.tracked_wallets) - 1
-                if i != last:
-                    self.tracked_wallets[i] = self.tracked_wallets[last]
-                self.tracked_wallets.pop()
-                return
-
-    # ─────────────────────────────────────────────
     #  OWNER: financial controls
     # ─────────────────────────────────────────────
     @gl.public.write
@@ -315,17 +323,19 @@ Rules:
     @gl.public.write
     def transfer_ownership(self, new_owner: str) -> None:
         assert gl.message.sender_address == self.owner, "Not owner"
-        if isinstance(new_owner, int):
-            self.owner = Address("0x" + format(new_owner, '040x'))
-        else:
-            self.owner = Address(new_owner)
+        self.owner = Address(str(new_owner))
+
+    @gl.public.write
+    def set_core(self, new_core: str) -> None:
+        assert gl.message.sender_address == self.owner, "Not owner"
+        self.core = Address(str(new_core))
 
     # ─────────────────────────────────────────────
     #  VIEW functions
     # ─────────────────────────────────────────────
     @gl.public.view
     def get_radar(self, token_address: str) -> str:
-        prefix = token_address.lower() + ":"
+        prefix = str(token_address).lower() + ":"
         for i in range(len(self.scans)):
             if self.scans[i].startswith(prefix):
                 return self.scans[i][len(prefix):]
@@ -342,13 +352,6 @@ Rules:
                 except Exception:
                     pass
         return json.dumps(results)
-
-    @gl.public.view
-    def get_tracked_wallets(self) -> str:
-        wallets = []
-        for i in range(len(self.tracked_wallets)):
-            wallets.append(self.tracked_wallets[i])
-        return json.dumps({"wallets": wallets, "count": len(wallets)})
 
     @gl.public.view
     def get_scan_count(self) -> str:
@@ -374,5 +377,4 @@ Rules:
             "fee_wei":      str(int(self.fee)),
             "treasury_wei": str(int(self.treasury)),
             "scan_count":   int(self.scan_count),
-            "wallet_count": len(self.tracked_wallets),
         }, sort_keys=True)

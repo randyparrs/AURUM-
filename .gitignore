@@ -1,0 +1,16 @@
+# Local scratch / test files — not part of the deployed suite
+bradbury/core_min.py
+bradbury/test_deploy.py
+bradbury/test_nodep.py
+bradbury/wallet_test.py
+bradbury/webpost_test.py
+bradbury/wallet_insights_old.py
+
+# Accidental temp artifacts
+bradbury/C*Tempcore_deploy.txt
+*.tmp
+*.bak
+
+# Python
+__pycache__/
+*.pyc

@@ -21,17 +21,14 @@ class AurumCore(gl.Contract):
     user_history:       DynArray[str]
     authorized_modules: DynArray[str]
 
-    def __init__(self, owner_address: str):
-        if isinstance(owner_address, int):
-            self.owner = Address("0x" + format(owner_address, '040x'))
-        else:
-            self.owner = Address(owner_address)
+    def __init__(self):
+        self.owner = gl.message.sender_address
         self.treasury = u256(0)
 
-        self.fee_token_scanner     = u256(1_000_000_000_000_000_000)
-        self.fee_wallet_insights   = u256(1_000_000_000_000_000_000)
-        self.fee_smart_money_radar = u256(300_000_000_000_000_000)
-        self.fee_gem_finder        = u256(1_000_000_000_000_000_000)
+        self.fee_token_scanner     = u256(0)
+        self.fee_wallet_insights   = u256(0)
+        self.fee_smart_money_radar = u256(0)
+        self.fee_gem_finder        = u256(0)
 
         self.total_token_scans     = u256(0)
         self.total_wallet_analyses = u256(0)
@@ -63,20 +60,19 @@ class AurumCore(gl.Contract):
     @gl.public.write
     def transfer_ownership(self, new_owner: str) -> None:
         assert gl.message.sender_address == self.owner, "Not owner"
-        if isinstance(new_owner, int):
-            self.owner = Address("0x" + format(new_owner, '040x'))
-        else:
-            self.owner = Address(new_owner)
+        self.owner = Address(str(new_owner))
 
     @gl.public.write
     def add_authorized_module(self, module_address: str) -> None:
         assert gl.message.sender_address == self.owner, "Not owner"
+        module_address = str(module_address)
         if module_address not in self.authorized_modules:
             self.authorized_modules.append(module_address)
 
-    @gl.public.write
+    @gl.public.write.payable
     def collect_fee(self, module: str, user_wallet: str) -> None:
         caller = str(gl.message.sender_address)
+        user_wallet = str(user_wallet)
         assert caller in self.authorized_modules, "Not authorized module"
         assert int(gl.message.value) > 0, "No fee sent"
 
@@ -147,7 +143,7 @@ class AurumCore(gl.Contract):
 
     @gl.public.view
     def get_user_history(self, wallet: str) -> str:
-        prefix = wallet + ":"
+        prefix = str(wallet) + ":"
         for i in range(len(self.user_history)):
             if self.user_history[i].startswith(prefix):
                 return self.user_history[i][len(prefix):]
@@ -155,7 +151,10 @@ class AurumCore(gl.Contract):
 
     @gl.public.view
     def get_authorized_modules(self) -> str:
-        return json.dumps(list(self.authorized_modules))
+        mods = []
+        for i in range(len(self.authorized_modules)):
+            mods.append(str(self.authorized_modules[i]))
+        return json.dumps(mods)
 
     @gl.public.view
     def get_owner(self) -> str:
